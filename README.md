@@ -1,4 +1,4 @@
-# F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching
+# Anemoia
 
 **F5-TTS**: Diffusion Transformer with ConvNeXt V2, faster trained and inference.
 
