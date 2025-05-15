@@ -8,18 +8,24 @@ def parse_package_name(dep):
     return re.split(r'[<>=!~\[]', dep.strip())[0]
 
 def main():
-    print(f"Python version: {sys.version.split()[0]}\n")
+    output_lines = []
+    output_lines.append(f"Python version: {sys.version.split()[0]}\n")
     with open("Anemoia/Anemoia/pyproject.toml", "rb") as f:
         data = tomli.load(f)
     deps = data["project"]["dependencies"]
-    print("Dependency versions in current environment:\n")
+    output_lines.append("Dependency versions in current environment:\n")
     for dep in deps:
         pkg = parse_package_name(dep)
         try:
             version = importlib.metadata.version(pkg)
-            print(f"{pkg}: {version}")
+            output_lines.append(f"{pkg}: {version}")
         except importlib.metadata.PackageNotFoundError:
-            print(f"{pkg}: NOT INSTALLED")
+            output_lines.append(f"{pkg}: NOT INSTALLED")
+    # Print to console
+    print('\n'.join(output_lines))
+    # Write to file
+    with open("installed_versions.txt", "w") as outf:
+        outf.write('\n'.join(output_lines) + '\n')
 
 if __name__ == "__main__":
     main()
