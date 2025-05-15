@@ -10,7 +10,7 @@ def parse_package_name(dep):
 def main():
     output_lines = []
     output_lines.append(f"Python version: {sys.version.split()[0]}\n")
-    with open("Anemoia/Anemoia/pyproject.toml", "rb") as f:
+    with open("pyproject.toml", "rb") as f:
         data = tomli.load(f)
     deps = data["project"]["dependencies"]
     output_lines.append("Dependency versions in current environment:\n")
