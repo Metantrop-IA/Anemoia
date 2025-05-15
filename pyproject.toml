@@ -14,13 +14,14 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
+    "pydantic==2.10.6"
+    "gradio==4.44.1",
     "accelerate>=0.33.0",
     "bitsandbytes==0.44.1",
     "cached_path",
     "click",
     "datasets",
     "ema_pytorch>=0.5.2",
-    "gradio>=3.45.2",
     "jieba",
     "librosa",
     "matplotlib",
