@@ -2,7 +2,34 @@
 # This file is auto-generated to simplify deployment and execution.
 # ...existing code from infer_gradio.py and all required dependencies will be inlined here...
 
-# Please wait while the full code is being merged...
+import sys
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
+import torchaudio
+import soundfile as sf
+from cached_path import cached_path
+import gradio as gr
+import faiss
+from third_party.BigVGAN import bigvgan
+from x_transformers import RMSNorm
+from x_transformers.x_transformers import apply_rotary_pos_emb
+from vocos import Vocos
+from torchdiffeq import odeint
+import jieba
+from pypinyin import lazy_pinyin, Style
+import librosa.filters
+from num2words import num2words
+from sentence_transformers import SentenceTransformer
+
+try:
+    import spaces
+    USING_SPACES = True
+except ImportError:
+    USING_SPACES = False
 
 # =====================
 # UTILS & MODEL CLASSES
@@ -776,17 +803,61 @@ def preprocess_ref_audio_text(ref_file, ref_text, device=None, show_info=None):
     return ref_file, ref_text
 
 def infer_process(ref_file, ref_text, gen_text, ema_model, vocoder, mel_spec_type=None, show_info=None, progress=None, target_rms=0.1, cross_fade_duration=0.15, nfe_step=32, cfg_strength=2, sway_sampling_coef=-1, speed=1.0, fix_duration=None, device=None):
-    # Dummy: return silence and dummy spectrogram
-    wav = np.zeros(target_sample_rate)
-    sr = target_sample_rate
-    spect = np.zeros((n_mel_channels, 100))
-    return wav, sr, spect
+    # Load and process reference audio
+    ref_audio, sr = torchaudio.load(ref_file)
+    ref_audio = ref_audio.to(device)
+    if sr != target_sample_rate:
+        ref_audio = torchaudio.functional.resample(ref_audio, sr, target_sample_rate)
+    
+    # Get mel spectrogram of reference audio
+    mel_spec = MelSpec(
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=win_length,
+        n_mel_channels=n_mel_channels,
+        target_sample_rate=target_sample_rate,
+        mel_spec_type=mel_spec_type or "vocos"
+    ).to(device)
+    
+    ref_mel = mel_spec(ref_audio)
+    
+    # Generate speech
+    duration = int(len(gen_text) * speed * target_sample_rate / hop_length)
+    if fix_duration:
+        duration = int(fix_duration * target_sample_rate / hop_length)
+    
+    # Use the model to generate audio
+    with torch.no_grad():
+        generated, _ = ema_model.sample(
+            ref_mel,
+            [gen_text],
+            duration,
+            steps=nfe_step,
+            cfg_strength=cfg_strength,
+            sway_sampling_coef=sway_sampling_coef,
+            vocoder=vocoder
+        )
+    
+    # Convert to numpy array
+    wav = generated.squeeze().cpu().numpy()
+    
+    # Normalize audio
+    if target_rms:
+        current_rms = np.sqrt(np.mean(wav ** 2))
+        wav = wav * (target_rms / current_rms)
+    
+    # Get final mel spectrogram
+    with torch.no_grad():
+        spect = mel_spec(torch.from_numpy(wav).float().to(device))
+        spect = spect.squeeze().cpu().numpy()
+    
+    return wav, target_sample_rate, spect
 
 # Fix empty function bodies in process_audio_input and generate_audio_response
 def process_audio_input(audio_path, text, history, conv_state):
     pass
 
-@gpu_decorator
+
 def generate_audio_response(history, ref_audio, ref_text, model_choice, remove_silence):
     if not history or not ref_audio:
         return None
@@ -1178,18 +1249,21 @@ with gr.Blocks() as app_chat:
             {"role": "assistant", "content": response}
         ])
         return history, conv_state
+
     @gpu_decorator
-    def generate_audio_response(history, ref_audio, ref_text, model, remove_silence):
+    def generate_audio_response(history, ref_audio, ref_text, model_choice, remove_silence):
         if not history or not ref_audio:
             return None
+        # Find the last assistant message
         last_message = next((msg for msg in reversed(history) if msg["role"] == "assistant"), None)
         if not last_message:
             return None
+        # Always use the F5TTS_ema_model for now
         audio_result, _ = infer(
             ref_audio,
             ref_text,
             last_message["content"],
-            model,
+            F5TTS_ema_model,
             remove_silence,
             cross_fade_duration=0.15,
             speed=1.0,
