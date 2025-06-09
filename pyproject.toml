@@ -58,6 +58,3 @@ eval = [
 
 [project.urls]
 Homepage = "https://github.com/Metantrop-IA/Anemoia/"
-
-[project.scripts]
-"f5-tts_infer-gradio" = "infer_gradio_merged:main"
