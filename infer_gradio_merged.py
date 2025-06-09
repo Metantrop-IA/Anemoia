@@ -768,6 +768,9 @@ def gpu_decorator(func):
         return func
 
 # load vocoder
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device=device):
     if vocoder_name == "vocos":
         if is_local:
