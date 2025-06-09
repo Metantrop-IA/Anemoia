@@ -799,6 +799,46 @@ def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device=dev
     return vocoder
 
 
+def load_model(
+    model_cls,
+    model_cfg,
+    ckpt_path,
+    mel_spec_type=mel_spec_type,
+    vocab_file="",
+    ode_method=ode_method,
+    use_ema=True,
+    device=device,
+):
+    if vocab_file == "":
+        vocab_file = str(files("f5_tts").joinpath("infer/examples/vocab.txt"))
+    tokenizer = "custom"
+
+    print("\nvocab : ", vocab_file)
+    print("tokenizer : ", tokenizer)
+    print("model : ", ckpt_path, "\n")
+
+    vocab_char_map, vocab_size = get_tokenizer(vocab_file, tokenizer)
+    model = CFM(
+        transformer=model_cls(**model_cfg, text_num_embeds=vocab_size, mel_dim=n_mel_channels),
+        mel_spec_kwargs=dict(
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            n_mel_channels=n_mel_channels,
+            target_sample_rate=target_sample_rate,
+            mel_spec_type=mel_spec_type,
+        ),
+        odeint_kwargs=dict(
+            method=ode_method,
+        ),
+        vocab_char_map=vocab_char_map,
+    ).to(device)
+
+    dtype = torch.float32 if mel_spec_type == "bigvgan" else None
+    model = load_checkpoint(model, ckpt_path, device, dtype=dtype, use_ema=use_ema)
+
+    return model
+
 # --- Model/vocoder loading ---
 vocoder = load_vocoder()
 F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
