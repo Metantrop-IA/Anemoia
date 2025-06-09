@@ -786,8 +786,26 @@ def infer_process(ref_file, ref_text, gen_text, ema_model, vocoder, mel_spec_typ
 def process_audio_input(audio_path, text, history, conv_state):
     pass
 
-def generate_audio_response(history, ref_audio, ref_text, model, remove_silence):
-    pass
+@gpu_decorator
+def generate_audio_response(history, ref_audio, ref_text, model_choice, remove_silence):
+    if not history or not ref_audio:
+        return None
+    # Find the last assistant message
+    last_message = next((msg for msg in reversed(history) if msg["role"] == "assistant"), None)
+    if not last_message:
+        return None
+    # Always use the F5TTS_ema_model for now
+    audio_result, _ = infer(
+        ref_audio,
+        ref_text,
+        last_message["content"],
+        F5TTS_ema_model,
+        remove_silence,
+        cross_fade_duration=0.15,
+        speed=1.0,
+        show_info=print
+    )
+    return audio_result
 
 
 class F5TTS:
