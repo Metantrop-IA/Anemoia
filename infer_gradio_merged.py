@@ -740,6 +740,10 @@ class TimestepEmbedding(nn.Module):
         return time
 # --- End: model/modules.py ---
 
+# REMOVED: from f5_tts.model import DiT, UNetT
+# REMOVED: from f5_tts.model.utils import seed_everything
+# The classes DiT, UNetT, and function seed_everything are already inlined above and should be used directly.
+
 from f5_tts.model import DiT, UNetT
 from f5_tts.model.utils import seed_everything
 
