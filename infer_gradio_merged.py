@@ -767,6 +767,34 @@ def gpu_decorator(func):
     else:
         return func
 
+# load vocoder
+def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device=device):
+    if vocoder_name == "vocos":
+        if is_local:
+            print(f"Load vocos from local path {local_path}")
+            vocoder = Vocos.from_hparams(f"{local_path}/config.yaml")
+            state_dict = torch.load(f"{local_path}/pytorch_model.bin", map_location="cpu")
+            vocoder.load_state_dict(state_dict)
+            vocoder = vocoder.eval().to(device)
+        else:
+            print("Download Vocos from huggingface charactr/vocos-mel-24khz")
+            vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz").to(device)
+    elif vocoder_name == "bigvgan":
+        try:
+            from third_party.BigVGAN import bigvgan
+        except ImportError:
+            print("You need to follow the README to init submodule and change the BigVGAN source code.")
+        if is_local:
+            """download from https://huggingface.co/nvidia/bigvgan_v2_24khz_100band_256x/tree/main"""
+            vocoder = bigvgan.BigVGAN.from_pretrained(local_path, use_cuda_kernel=False)
+        else:
+            vocoder = bigvgan.BigVGAN.from_pretrained("nvidia/bigvgan_v2_24khz_100band_256x", use_cuda_kernel=False)
+
+        vocoder.remove_weight_norm()
+        vocoder = vocoder.eval().to(device)
+    return vocoder
+
+
 # --- Model/vocoder loading ---
 vocoder = load_vocoder()
 F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
