@@ -455,6 +455,7 @@ import torch.nn.functional as F
 import torchaudio
 from torch import nn
 from x_transformers.x_transformers import apply_rotary_pos_emb
+from vocos import Vocos
 
 # MelSpec
 class MelSpec(nn.Module):
