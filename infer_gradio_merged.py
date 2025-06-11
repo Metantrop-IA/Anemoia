@@ -808,6 +808,31 @@ def generate_audio_response(history, ref_audio, ref_text, model_choice, remove_s
     return audio_result
 
 
+################### F5-TTS Stuff Start ##################
+
+import random
+import sys
+from importlib.resources import files
+
+import soundfile as sf
+import torch
+import tqdm
+from cached_path import cached_path
+
+from f5_tts.infer.utils_infer import (
+    hop_length,
+    infer_process,
+    load_model,
+    load_vocoder,
+    preprocess_ref_audio_text,
+    remove_silence_for_generated_wav,
+    save_spectrogram,
+    target_sample_rate,
+)
+from f5_tts.model import DiT, UNetT
+from f5_tts.model.utils import seed_everything
+
+
 class F5TTS:
     def __init__(
         self,
@@ -921,6 +946,25 @@ class F5TTS:
             self.export_spectrogram(spect, file_spect)
 
         return wav, sr, spect
+
+
+if __name__ == "__main__":
+    f5tts = F5TTS()
+
+    wav, sr, spect = f5tts.infer(
+        ref_file=str(files("f5_tts").joinpath("infer/examples/basic/basic_ref_en.wav")),
+        ref_text="some call me nature, others call me mother nature.",
+        gen_text="""I don't really care what you call me. I've been a silent spectator, watching species evolve, empires rise and fall. But always remember, I am mighty and enduring. Respect me and I'll nurture you; ignore me and you shall face the consequences.""",
+        file_wave=str(files("f5_tts").joinpath("../../tests/api_out.wav")),
+        file_spect=str(files("f5_tts").joinpath("../../tests/api_out.png")),
+        seed=-1,  # random seed = -1
+    )
+
+    print("seed :", f5tts.seed)
+
+##################### F5-TTS Stuff End #####################
+
+
 
 
 # =====================
@@ -1098,7 +1142,7 @@ def parse_speechtypes_text(gen_text):
             current_style = style
     return segments
 
-# ========== GRADIO APP ========== #
+########## INICIA GRADIO PRINCIPAL ##########
 with gr.Blocks() as app_chat:
     gr.Markdown("""
 # Mnemosynth
@@ -1108,56 +1152,82 @@ with gr.Blocks() as app_chat:
         model_name = "Qwen/Qwen2.5-3B-Instruct"
         chat_model_state = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype="auto", device_map="auto")
         chat_tokenizer_state = AutoTokenizer.from_pretrained(model_name)
+
+    # Construir rutas absolutas a los assets        
     ASSETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "Assets"))
     initial_prompt_path = os.path.join(ASSETS_DIR, "Initial_Prompt.txt")
     voice_ref_trans_path = os.path.join(ASSETS_DIR, "Voice_Ref_Trans.txt")
     docs_RAG_path = os.path.join(ASSETS_DIR, "Docs_RAG.txt")
     voice_ref_wav_path = os.path.join(ASSETS_DIR, "Voice_Ref.wav")
+
+    # Cargar contenido del prompt inicial y archivos
     try:
         with open(initial_prompt_path, "r", encoding="utf-8") as f:
             initial_prompt = f.read().strip()
+            print(f"Archivo Initial_Prompt.txt cargado exitosamente en: {initial_prompt_path}")
     except Exception as e:
+        print(f"Error leyendo Initial_Prompt.txt en {initial_prompt_path}: {e}")
         initial_prompt = "No eres un asistente de IA, eres quien el usuario diga que eres..."
+    
     try:
         with open(docs_RAG_path, "r", encoding="utf-8") as f:
             docs = f.read().strip()
+            print(f"Archivo Docs_RAG.txt cargado exitosamente en: {docs_RAG_path}")
     except Exception as e:
         docs = ""
+    
     try:
         with open(voice_ref_trans_path, "r") as f:
             voice_ref_trans = f.read().strip()
+            print(f"Archivo Voice_Ref_Trans.txt cargado exitosamente en: {voice_ref_trans_path}")
     except Exception as e:
+        print(f"Error leyendo archivo Voice_Ref_Trans.txt en {voice_ref_trans_path}: {e}")
         voice_ref_trans = ""
+
+    # Convertir docs a lista de documentos (por líneas no vacías)        
     docs_list = [line.strip() for line in docs.splitlines() if line.strip()]
+    
+    # Verificación: si no hay documentos, evitar crear el índice FAISS
     if not docs_list:
         embedding_model = None
         index = None
         def retrieve_context(query, top_k=3):
             return []
     else:
+        # Creacion del índice FAISS
         embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
         doc_embeddings = embedding_model.encode(docs_list, convert_to_numpy=True)
         index = faiss.IndexFlatL2(doc_embeddings.shape[1])
         index.add(doc_embeddings)
+        
         def retrieve_context(query, top_k=3):
             query_emb = embedding_model.encode([query], convert_to_numpy=True)
             D, I = index.search(query_emb, top_k)
             return [docs_list[i] for i in I[0]]
+    
+    # Asignar rutas y valores usando componentes Gradio
     ref_audio_chat = gr.Audio(value=voice_ref_wav_path, visible=False, type="filepath")
     model_choice_chat = gr.Radio(choices=["F5-TTS"], label="Seleccionar Modelo TTS", value="F5-TTS", visible=False)
     remove_silence_chat = gr.Checkbox(value=True, visible=False)
     ref_text_chat = gr.Textbox(value=voice_ref_trans, visible=False)
     system_prompt_chat = gr.Textbox(value=initial_prompt, visible=False)
+    
+    #Crea la interfaz de Gradio
     with gr.Row():
         with gr.Column():
             audio_input_chat = gr.Microphone(label="Graba tu mensaje",type="filepath")
             audio_output_chat = gr.Audio(autoplay=True, label="Respuesta")
+        
         with gr.Column():
             text_input_chat = gr.Textbox(label="Escribe tu mensaje",lines=1)
             send_btn_chat = gr.Button("Enviar")
             clear_btn_chat = gr.Button("Limpiar Conversación")
             chatbot_interface = gr.Chatbot(label="Conversación", type="messages")
+    
+    
     conversation_state = gr.State(value=[{"role": "system", "content": initial_prompt}])
+
+
     @gpu_decorator
     def process_audio_input(audio_path, text, history, conv_state):
         if not audio_path and not text.strip():
@@ -1166,7 +1236,11 @@ with gr.Blocks() as app_chat:
             text = preprocess_ref_audio_text(audio_path, text)[1]
         if not text.strip():
             return history, conv_state
+        
+# --- RAG: Recupera contexto relevante ---
         contexto = " ".join(retrieve_context(text, top_k=3))
+
+        # Puedes incluir el contexto como parte del mensaje del sistema o del usuario
         conv_state.append({"role": "system", "content": f"Contexto relevante: {contexto}"})
         conv_state.append({"role": "user", "content": text})
         response = generate_response(conv_state, chat_model_state, chat_tokenizer_state)
@@ -1178,10 +1252,13 @@ with gr.Blocks() as app_chat:
             {"role": "assistant", "content": response}
         ])
         return history, conv_state
+    
     @gpu_decorator
     def generate_audio_response(history, ref_audio, ref_text, model, remove_silence):
+        """Generate TTS audio for AI response"""
         if not history or not ref_audio:
             return None
+        # Get last assistant message
         last_message = next((msg for msg in reversed(history) if msg["role"] == "assistant"), None)
         if not last_message:
             return None
@@ -1196,6 +1273,7 @@ with gr.Blocks() as app_chat:
             show_info=print
         )
         return audio_result
+    
     def clear_conversation():
         return [], [
             {"role": "system", "content": initial_prompt}
@@ -1203,6 +1281,8 @@ with gr.Blocks() as app_chat:
     def update_system_prompt(new_prompt):
         new_conv_state = [{"role": "system", "content": new_prompt}]
         return [], new_conv_state
+
+    # Handle audio input
     audio_input_chat.stop_recording(
         fn=process_audio_input,
         inputs=[audio_input_chat, text_input_chat, chatbot_interface, conversation_state],
@@ -1212,6 +1292,8 @@ with gr.Blocks() as app_chat:
         inputs=[chatbot_interface, ref_audio_chat, ref_text_chat, model_choice_chat, remove_silence_chat],
         outputs=[audio_output_chat]
     )
+
+    # Handle text input
     text_input_chat.submit(
         process_audio_input,
         inputs=[audio_input_chat, text_input_chat, chatbot_interface, conversation_state],
@@ -1225,6 +1307,8 @@ with gr.Blocks() as app_chat:
         None,
         text_input_chat,
     )
+
+    # Handle send button
     send_btn_chat.click(
         process_audio_input,
         inputs=[audio_input_chat, text_input_chat, chatbot_interface, conversation_state],
@@ -1238,16 +1322,20 @@ with gr.Blocks() as app_chat:
         None,
         text_input_chat,
     )
+
+    # Handle clear button
     clear_btn_chat.click(
         clear_conversation,
         outputs=[chatbot_interface, conversation_state],
     )
+
+    # Handle system prompt change and reset conversation
     system_prompt_chat.change(
         update_system_prompt,
         inputs=system_prompt_chat,
         outputs=[chatbot_interface, conversation_state],
     )
-# ========== END GRADIO APP ========== #
+########## TERMINA GRADIO PRINCIPAL ##########
 
 with gr.Blocks() as app_credits:
     gr.Markdown("""
