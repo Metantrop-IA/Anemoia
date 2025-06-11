@@ -782,190 +782,163 @@ def infer_process(ref_file, ref_text, gen_text, ema_model, vocoder, mel_spec_typ
     spect = np.zeros((n_mel_channels, 100))
     return wav, sr, spect
 
-# Fix empty function bodies in process_audio_input and generate_audio_response
-def process_audio_input(audio_path, text, history, conv_state):
-    pass
-
-
-def generate_audio_response(history, ref_audio, ref_text, model_choice, remove_silence):
-    if not history or not ref_audio:
-        return None
-    # Find the last assistant message
-    last_message = next((msg for msg in reversed(history) if msg["role"] == "assistant"), None)
-    if not last_message:
-        return None
-    # Always use the F5TTS_ema_model for now
-    audio_result, _ = infer(
-        ref_audio,
-        ref_text,
-        last_message["content"],
-        F5TTS_ema_model,
-        remove_silence,
-        cross_fade_duration=0.15,
-        speed=1.0,
-        show_info=print
-    )
-    return audio_result
-
-
-################### F5-TTS Stuff Start ##################
-
-import random
-import sys
-from importlib.resources import files
-
-import soundfile as sf
+import re
+import tempfile
+import numpy as np
 import torch
+import torchaudio
 import tqdm
-from cached_path import cached_path
+from vocos import Vocos
 
-from f5_tts.infer.utils_infer import (
-    hop_length,
-    infer_process,
-    load_model,
-    load_vocoder,
-    preprocess_ref_audio_text,
-    remove_silence_for_generated_wav,
-    save_spectrogram,
-    target_sample_rate,
-)
-from f5_tts.model import DiT, UNetT
-from f5_tts.model.utils import seed_everything
-
-
-class F5TTS:
-    def __init__(
-        self,
-        model_type="F5-TTS",
-        ckpt_file="",
-        vocab_file="",
-        ode_method="euler",
-        use_ema=True,
-        vocoder_name="vocos",
-        local_path=None,
-        device=None,
-    ):
-        # Initialize parameters
-        self.final_wave = None
-        self.target_sample_rate = target_sample_rate
-        self.hop_length = hop_length
-        self.seed = -1
-        self.mel_spec_type = vocoder_name
-
-        # Set device
-        self.device = device or (
-            "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-        )
-
-        # Load models
-        self.load_vocoder_model(vocoder_name, local_path)
-        self.load_ema_model(model_type, ckpt_file, vocoder_name, vocab_file, ode_method, use_ema)
-
-    def load_vocoder_model(self, vocoder_name, local_path):
-        self.vocoder = load_vocoder(vocoder_name, local_path is not None, local_path, self.device)
-
-    def load_ema_model(self, model_type, ckpt_file, mel_spec_type, vocab_file, ode_method, use_ema):
-        if model_type == "F5-TTS":
-            if not ckpt_file:
-                if mel_spec_type == "vocos":
-                    ckpt_file = str(cached_path("hf://SWivid/F5-TTS/F5TTS_Base/model_1200000.safetensors"))
-                elif mel_spec_type == "bigvgan":
-                    ckpt_file = str(cached_path("hf://SWivid/F5-TTS/F5TTS_Base_bigvgan/model_1250000.pt"))
-            model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
-            model_cls = DiT
-        elif model_type == "E2-TTS":
-            if not ckpt_file:
-                ckpt_file = str(cached_path("hf://SWivid/E2-TTS/E2TTS_Base/model_1200000.safetensors"))
-            model_cfg = dict(dim=1024, depth=24, heads=16, ff_mult=4)
-            model_cls = UNetT
+# --- Helper: chunk_text ---
+def chunk_text(text, max_chars=135):
+    chunks = []
+    current_chunk = ""
+    sentences = re.split(r"(?<=[;:,.!?])\s+|(?<=[；：，。！？])", text)
+    for sentence in sentences:
+        if len(current_chunk.encode("utf-8")) + len(sentence.encode("utf-8")) <= max_chars:
+            current_chunk += sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
         else:
-            raise ValueError(f"Unknown model type: {model_type}")
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    return chunks
 
-        self.ema_model = load_model(
-            model_cls, model_cfg, ckpt_file, mel_spec_type, vocab_file, ode_method, use_ema, self.device
-        )
+# --- Helper: infer_batch_process ---
+def infer_batch_process(
+    ref_audio,
+    ref_text,
+    gen_text_batches,
+    model_obj,
+    vocoder,
+    mel_spec_type="vocos",
+    progress=tqdm,
+    target_rms=0.1,
+    cross_fade_duration=0.15,
+    nfe_step=32,
+    cfg_strength=2.0,
+    sway_sampling_coef=-1,
+    speed=1,
+    fix_duration=None,
+    device=None,
+):
+    audio, sr = ref_audio
+    if audio.shape[0] > 1:
+        audio = torch.mean(audio, dim=0, keepdim=True)
+    rms = torch.sqrt(torch.mean(torch.square(audio)))
+    if rms < target_rms:
+        audio = audio * target_rms / rms
+    if sr != 24000:
+        resampler = torchaudio.transforms.Resample(sr, 24000)
+        audio = resampler(audio)
+    audio = audio.to(device)
+    generated_waves = []
+    spectrograms = []
+    if len(ref_text[-1].encode("utf-8")) == 1:
+        ref_text = ref_text + " "
+    for i, gen_text in enumerate(progress.tqdm(gen_text_batches)):
+        text_list = [ref_text + gen_text]
+        # Ensure text_list is on the correct device if it's a tensor
+        if isinstance(text_list, torch.Tensor):
+            text_list = text_list.to(device)
+        ref_audio_len = audio.shape[-1] // 256
+        if fix_duration is not None:
+            duration = int(fix_duration * 24000 / 256)
+        else:
+            ref_text_len = len(ref_text.encode("utf-8"))
+            gen_text_len = len(gen_text.encode("utf-8"))
+            duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / speed)
+        with torch.inference_mode():
+            generated, _ = model_obj.sample(
+                cond=audio,
+                text=text_list,
+                duration=duration,
+                steps=nfe_step,
+                cfg_strength=cfg_strength,
+                sway_sampling_coef=sway_sampling_coef,
+            )
+            generated = generated.to(torch.float32)
+            generated = generated[:, ref_audio_len:, :]
+            generated_mel_spec = generated.permute(0, 2, 1)
+            if mel_spec_type == "vocos":
+                generated_wave = vocoder.decode(generated_mel_spec)
+            elif mel_spec_type == "bigvgan":
+                generated_wave = vocoder(generated_mel_spec)
+            if rms < target_rms:
+                generated_wave = generated_wave * rms / target_rms
+            generated_wave = generated_wave.squeeze().cpu().numpy()
+            generated_waves.append(generated_wave)
+            spectrograms.append(generated_mel_spec[0].cpu().numpy())
+    if cross_fade_duration <= 0:
+        final_wave = np.concatenate(generated_waves)
+    else:
+        final_wave = generated_waves[0]
+        for i in range(1, len(generated_waves)):
+            prev_wave = final_wave
+            next_wave = generated_waves[i]
+            cross_fade_samples = int(cross_fade_duration * 24000)
+            cross_fade_samples = min(cross_fade_samples, len(prev_wave), len(next_wave))
+            if cross_fade_samples <= 0:
+                final_wave = np.concatenate([prev_wave, next_wave])
+                continue
+            prev_overlap = prev_wave[-cross_fade_samples:]
+            next_overlap = next_wave[:cross_fade_samples]
+            fade_out = np.linspace(1, 0, cross_fade_samples)
+            fade_in = np.linspace(0, 1, cross_fade_samples)
+            cross_faded_overlap = prev_overlap * fade_out + next_overlap * fade_in
+            new_wave = np.concatenate([
+                prev_wave[:-cross_fade_samples],
+                cross_faded_overlap,
+                next_wave[cross_fade_samples:]
+            ])
+            final_wave = new_wave
+    combined_spectrogram = np.concatenate(spectrograms, axis=1)
+    return final_wave, 24000, combined_spectrogram
 
-    def export_wav(self, wav, file_wave, remove_silence=False):
-        sf.write(file_wave, wav, self.target_sample_rate)
-
-        if remove_silence:
-            remove_silence_for_generated_wav(file_wave)
-
-    def export_spectrogram(self, spect, file_spect):
-        save_spectrogram(spect, file_spect)
-
-    def infer(
-        self,
-        ref_file,
+# --- Main: infer_process ---
+def infer_process(
+    ref_file,
+    ref_text,
+    gen_text,
+    ema_model,
+    vocoder,
+    mel_spec_type=None,
+    show_info=None,
+    progress=None,
+    target_rms=0.1,
+    cross_fade_duration=0.15,
+    nfe_step=32,
+    cfg_strength=2,
+    sway_sampling_coef=-1,
+    speed=1.0,
+    fix_duration=None,
+    device=None,
+):
+    audio, sr = torchaudio.load(ref_file)
+    max_chars = int(len(ref_text.encode("utf-8")) / (audio.shape[-1] / sr) * (25 - audio.shape[-1] / sr))
+    gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
+    if show_info:
+        show_info(f"Generating audio in {len(gen_text_batches)} batches...")
+    return infer_batch_process(
+        (audio, sr),
         ref_text,
-        gen_text,
-        show_info=print,
-        progress=tqdm,
-        target_rms=0.1,
-        cross_fade_duration=0.15,
-        sway_sampling_coef=-1,
-        cfg_strength=2,
-        nfe_step=32,
-        speed=1.0,
-        fix_duration=None,
-        remove_silence=False,
-        file_wave=None,
-        file_spect=None,
-        seed=-1,
-    ):
-        if seed == -1:
-            seed = random.randint(0, sys.maxsize)
-        seed_everything(seed)
-        self.seed = seed
-
-        ref_file, ref_text = preprocess_ref_audio_text(ref_file, ref_text, device=self.device)
-
-        wav, sr, spect = infer_process(
-            ref_file,
-            ref_text,
-            gen_text,
-            self.ema_model,
-            self.vocoder,
-            self.mel_spec_type,
-            show_info=show_info,
-            progress=progress,
-            target_rms=target_rms,
-            cross_fade_duration=cross_fade_duration,
-            nfe_step=nfe_step,
-            cfg_strength=cfg_strength,
-            sway_sampling_coef=sway_sampling_coef,
-            speed=speed,
-            fix_duration=fix_duration,
-            device=self.device,
-        )
-
-        if file_wave is not None:
-            self.export_wav(wav, file_wave, remove_silence)
-
-        if file_spect is not None:
-            self.export_spectrogram(spect, file_spect)
-
-        return wav, sr, spect
-
-
-if __name__ == "__main__":
-    f5tts = F5TTS()
-
-    wav, sr, spect = f5tts.infer(
-        ref_file=str(files("f5_tts").joinpath("infer/examples/basic/basic_ref_en.wav")),
-        ref_text="some call me nature, others call me mother nature.",
-        gen_text="""I don't really care what you call me. I've been a silent spectator, watching species evolve, empires rise and fall. But always remember, I am mighty and enduring. Respect me and I'll nurture you; ignore me and you shall face the consequences.""",
-        file_wave=str(files("f5_tts").joinpath("../../tests/api_out.wav")),
-        file_spect=str(files("f5_tts").joinpath("../../tests/api_out.png")),
-        seed=-1,  # random seed = -1
+        gen_text_batches,
+        ema_model,
+        vocoder,
+        mel_spec_type=mel_spec_type or "vocos",
+        progress=tqdm if progress is None else progress,
+        target_rms=target_rms,
+        cross_fade_duration=cross_fade_duration,
+        nfe_step=nfe_step,
+        cfg_strength=cfg_strength,
+        sway_sampling_coef=sway_sampling_coef,
+        speed=speed,
+        fix_duration=fix_duration,
+        device=device,
     )
-
-    print("seed :", f5tts.seed)
-
-##################### F5-TTS Stuff End #####################
-
-
-
+# ...existing code...
 
 # =====================
 # MAIN GRADIO APP LOGIC
