@@ -1,7 +1,3 @@
-import os
-# Disable HuggingFace tokenizers parallelism warning
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
 import re
 import tempfile
 import os
@@ -22,9 +18,19 @@ from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import Chroma
 import pdfplumber
 
-# Disable ZeroGPU wrapper to avoid GPU task aborted errors
+try:
+    import spaces
+
+    USING_SPACES = True
+except ImportError:
+    USING_SPACES = False
+
+
 def gpu_decorator(func):
-    return func
+    if USING_SPACES:
+        return spaces.GPU(func)
+    else:
+        return func
 
 from f5_tts.model import DiT, UNetT
 from f5_tts.infer.utils_infer import (
