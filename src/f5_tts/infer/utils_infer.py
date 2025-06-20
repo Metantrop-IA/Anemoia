@@ -121,14 +121,7 @@ except Exception:
     dtype = torch.float32
 
 # load asr pipeline
-
-asr_pipe = pipeline(
-    "automatic-speech-recognition",
-    model="openai/whisper-large-v3-turbo",
-    torch_dtype=dtype,
-    device=device,
-    generate_kwargs={"task": "transcribe", "language": "es", "forced_decoder_ids": None}  # Especificar Español y anular forced_decoder_ids
-)
+asr_pipe = None
 
 
 # load model checkpoint for inference
@@ -289,9 +282,15 @@ def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_in
         if not ref_text.strip():
             global asr_pipe
             if asr_pipe is None:
-                # This block might be problematic if initialize_asr_pipeline is not defined
-                # However, asr_pipe is initialized globally, so this might not be reached.
-                initialize_asr_pipeline(device=device)
+                show_info("Initializing ASR pipeline...")
+                asr_pipe = pipeline(
+                    "automatic-speech-recognition",
+                    model="openai/whisper-large-v3-turbo",
+                    torch_dtype=dtype,
+                    device=device,
+                    generate_kwargs={"task": "transcribe", "language": "es", "forced_decoder_ids": None}
+                )
+                show_info("ASR pipeline initialized.")
             show_info("No reference text provided, transcribing reference audio...")
             ref_text = asr_pipe(
                 ref_audio,

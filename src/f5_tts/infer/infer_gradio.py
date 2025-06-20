@@ -2,6 +2,8 @@ import re
 import tempfile
 import os
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import click
 import gradio as gr
 import numpy as np
@@ -18,18 +20,18 @@ from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import Chroma
 import pdfplumber
 
-try:
-    import spaces
+# Check if running on Hugging Face Spaces
+USING_SPACES = os.environ.get("SPACE_ID") is not None
 
-    USING_SPACES = True
-except ImportError:
-    USING_SPACES = False
-
-
-def gpu_decorator(func):
-    if USING_SPACES:
-        return spaces.GPU(func)
-    else:
+if USING_SPACES:
+    try:
+        import spaces
+        gpu_decorator = spaces.GPU
+    except ImportError:
+        def gpu_decorator(func):
+            return func
+else:
+    def gpu_decorator(func):
         return func
 
 from f5_tts.model import DiT, UNetT
@@ -42,16 +44,19 @@ from f5_tts.infer.utils_infer import (
     save_spectrogram,
 )
 
-vocoder = load_vocoder()
-
-# load models
-F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
-F5TTS_ema_model = load_model(
-    DiT, F5TTS_model_cfg, str(cached_path("hf://jpgallegoar/F5-Spanish/model_1200000.safetensors"))
-)
-
+# Lazy load models
+vocoder_state = None
+F5TTS_ema_model_state = None
 chat_model_state = None
 chat_tokenizer_state = None
+embedding_state = None
+chroma_db_state = None
+
+
+@gpu_decorator
+def spaces_startup():
+    """Dummy function to ensure Spaces detects GPU usage during startup"""
+    print("Startup function for Spaces GPU detection running.")
 
 @gpu_decorator
 def generate_response(messages, model, tokenizer):
@@ -87,13 +92,28 @@ def traducir_numero_a_texto(texto):
 
     return texto_traducido
 
+
 @gpu_decorator
 def infer(
     ref_audio_orig, ref_text, gen_text, model, remove_silence, cross_fade_duration=0.15, speed=1, show_info=gr.Info
 ):
+    global vocoder_state, F5TTS_ema_model_state
+    if vocoder_state is None:
+        print("Loading vocoder...")
+        vocoder_state = load_vocoder()
+        print("Vocoder loaded.")
+
+    if F5TTS_ema_model_state is None:
+        print("Loading F5-TTS model...")
+        F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
+        F5TTS_ema_model_state = load_model(
+            DiT, F5TTS_model_cfg, str(cached_path("hf://jpgallegoar/F5-Spanish/model_1200000.safetensors"))
+        )
+        print("F5-TTS model loaded.")
+
     ref_audio, ref_text = preprocess_ref_audio_text(ref_audio_orig, ref_text, show_info=show_info)
 
-    ema_model = F5TTS_ema_model
+    ema_model = F5TTS_ema_model_state
 
     if not gen_text.startswith(" "):
         gen_text = " " + gen_text
@@ -108,7 +128,7 @@ def infer(
         ref_text,
         gen_text,
         ema_model,
-        vocoder,
+        vocoder_state,
         cross_fade_duration=cross_fade_duration,
         speed=speed,
         show_info=show_info,
@@ -216,17 +236,24 @@ with gr.Blocks() as app_chat:
 
     if not rag_documents:
         print("ADVERTENCIA: No se encontraron PDFs en Assets/RAG. La recuperación de contexto estará deshabilitada.")
-        chroma_db = None
         def retrieve_context(query, top_k=3):
             return []
     else:
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         rag_chunks = splitter.split_documents(rag_documents)
-        embedding = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        chroma_db = Chroma.from_documents(rag_chunks, embedding, persist_directory=os.path.join(PDF_RAG_DIR, "chroma_db"))
         def retrieve_context(query, top_k=3):
-            results = chroma_db.similarity_search(query, k=top_k)
-            return [doc.page_content for doc in results]
+            global embedding_state, chroma_db_state
+            if chroma_db_state is None:
+                print("Loading embedding model and creating Chroma DB for RAG...")
+                if embedding_state is None:
+                    embedding_state = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+                chroma_db_state = Chroma.from_documents(rag_chunks, embedding_state, persist_directory=os.path.join(PDF_RAG_DIR, "chroma_db"))
+                print("Chroma DB created.")
+            
+            if chroma_db_state:
+                results = chroma_db_state.similarity_search(query, k=top_k)
+                return [doc.page_content for doc in results]
+            return []
 
     # Asignar rutas y valores usando componentes Gradio
     ref_audio_chat = gr.Audio(value=voice_ref_wav_path, visible=False, type="filepath")
@@ -417,7 +444,8 @@ def main(port, host, share, api):
 
 
 if __name__ == "__main__":
-    if not USING_SPACES:
-        main()
-    else:
+    if USING_SPACES:
+        spaces_startup()
         app.queue().launch()
+    else:
+        main()
