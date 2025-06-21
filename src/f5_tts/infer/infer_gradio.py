@@ -16,7 +16,7 @@ from sentence_transformers import SentenceTransformer
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import Chroma
 import pdfplumber
 
@@ -246,7 +246,10 @@ with gr.Blocks() as app_chat:
             if chroma_db_state is None:
                 print("Loading embedding model and creating Chroma DB for RAG...")
                 if embedding_state is None:
-                    embedding_state = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+                    embedding_state = HuggingFaceEmbeddings(
+                        model_name="all-MiniLM-L6-v2",
+                        model_kwargs={'device': 'cpu'}
+                    )
                 chroma_db_state = Chroma.from_documents(rag_chunks, embedding_state, persist_directory=os.path.join(PDF_RAG_DIR, "chroma_db"))
                 print("Chroma DB created.")
             
@@ -288,7 +291,6 @@ with gr.Blocks() as app_chat:
     )
 
 
-    @gpu_decorator
     def process_audio_input(audio_path, text, history, conv_state):
         if not audio_path and not text.strip():
             return history, conv_state
@@ -317,7 +319,6 @@ with gr.Blocks() as app_chat:
 
         return history, conv_state
 
-    @gpu_decorator
     def generate_audio_response(history, ref_audio, ref_text, model, remove_silence):
         """Generate TTS audio for AI response"""
         if not history or not ref_audio:
