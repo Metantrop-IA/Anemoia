@@ -58,7 +58,7 @@ def spaces_startup():
     """Dummy function to ensure Spaces detects GPU usage during startup"""
     print("Startup function for Spaces GPU detection running.")
 
-@gpu_decorator
+
 def generate_response(messages, model, tokenizer):
     """Generate response using Qwen"""
     text = tokenizer.apply_chat_template(
@@ -93,7 +93,6 @@ def traducir_numero_a_texto(texto):
     return texto_traducido
 
 
-@gpu_decorator
 def infer(
     ref_audio_orig, ref_text, gen_text, model, remove_silence, cross_fade_duration=0.15, speed=1, show_info=gr.Info
 ):
@@ -185,11 +184,6 @@ with gr.Blocks() as app_chat:
     )
 
     chat_interface_container = gr.Column()
-
-    if chat_model_state is None:
-        model_name = "Qwen/Qwen2.5-3B-Instruct"
-        chat_model_state = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype="auto", device_map="auto")
-        chat_tokenizer_state = AutoTokenizer.from_pretrained(model_name)
 
     # Construir rutas absolutas a los assets
     ASSETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "Assets"))
@@ -292,6 +286,14 @@ with gr.Blocks() as app_chat:
 
 
     def process_audio_input(audio_path, text, history, conv_state):
+        global chat_model_state, chat_tokenizer_state
+        if chat_model_state is None:
+            print("Loading chat model...")
+            model_name = "Qwen/Qwen2.5-3B-Instruct"
+            chat_model_state = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype="auto", device_map="auto")
+            chat_tokenizer_state = AutoTokenizer.from_pretrained(model_name)
+            print("Chat model loaded.")
+
         if not audio_path and not text.strip():
             return history, conv_state
 
