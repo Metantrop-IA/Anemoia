@@ -31,6 +31,7 @@ from f5_tts.model.utils import (
 
 _ref_audio_cache = {}
 
+device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 # -----------------------------------------
 
@@ -86,7 +87,7 @@ def chunk_text(text, max_chars=135):
 
 
 # load vocoder
-def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device="cpu"):
+def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device=device):
     if vocoder_name == "vocos":
         if is_local:
             print(f"Load vocos from local path {local_path}")
@@ -113,8 +114,21 @@ def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device="cp
     return vocoder
 
 
+# Define dtype for torch_dtype usage
+try:
+    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+except Exception:
+    dtype = torch.float32
+
 # load asr pipeline
-asr_pipe = None
+
+asr_pipe = pipeline(
+    "automatic-speech-recognition",
+    model="openai/whisper-large-v3-turbo",
+    torch_dtype=dtype,
+    device=device,
+    generate_kwargs={"task": "transcribe", "language": "es", "forced_decoder_ids": None}  # Especificar Español y anular forced_decoder_ids
+)
 
 
 # load model checkpoint for inference
@@ -169,7 +183,7 @@ def load_model(
     vocab_file="",
     ode_method=ode_method,
     use_ema=True,
-    device="cpu",
+    device=device,
 ):
     if vocab_file == "":
         vocab_file = str(files("f5_tts").joinpath("infer/examples/vocab.txt"))
@@ -221,7 +235,7 @@ def remove_silence_edges(audio, silence_threshold=-42):
 # preprocess reference audio and text
 
 
-def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_info=print, device="cpu"):
+def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_info=print, device=device):
     show_info("Converting audio...")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
         aseg = AudioSegment.from_file(ref_audio_orig)
@@ -275,19 +289,9 @@ def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_in
         if not ref_text.strip():
             global asr_pipe
             if asr_pipe is None:
-                show_info("Initializing ASR pipeline...")
-                try:
-                    dtype = torch.float16 if device == "cuda" else torch.float32
-                except Exception:
-                    dtype = torch.float32
-                asr_pipe = pipeline(
-                    "automatic-speech-recognition",
-                    model="openai/whisper-large-v3-turbo",
-                    torch_dtype=dtype,
-                    device=device,
-                    generate_kwargs={"task": "transcribe", "language": "es", "forced_decoder_ids": None}
-                )
-                show_info("ASR pipeline initialized.")
+                # This block might be problematic if initialize_asr_pipeline is not defined
+                # However, asr_pipe is initialized globally, so this might not be reached.
+                initialize_asr_pipeline(device=device)
             show_info("No reference text provided, transcribing reference audio...")
             ref_text = asr_pipe(
                 ref_audio,
@@ -331,7 +335,7 @@ def infer_process(
     sway_sampling_coef=sway_sampling_coef,
     speed=speed,
     fix_duration=fix_duration,
-    device="cpu",
+    device=device,
 ):
     # Split the input text into batches
     audio, sr = torchaudio.load(ref_audio)
@@ -378,7 +382,7 @@ def infer_batch_process(
     sway_sampling_coef=-1,
     speed=1,
     fix_duration=None,
-    device="cpu",
+    device=None,
 ):
     audio, sr = ref_audio
     if audio.shape[0] > 1:
