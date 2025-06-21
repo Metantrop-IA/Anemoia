@@ -31,7 +31,6 @@ from f5_tts.model.utils import (
 
 _ref_audio_cache = {}
 
-device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 # -----------------------------------------
 
@@ -87,7 +86,7 @@ def chunk_text(text, max_chars=135):
 
 
 # load vocoder
-def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device=device):
+def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device="cpu"):
     if vocoder_name == "vocos":
         if is_local:
             print(f"Load vocos from local path {local_path}")
@@ -113,12 +112,6 @@ def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device=dev
         vocoder = vocoder.eval().to(device)
     return vocoder
 
-
-# Define dtype for torch_dtype usage
-try:
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-except Exception:
-    dtype = torch.float32
 
 # load asr pipeline
 asr_pipe = None
@@ -176,7 +169,7 @@ def load_model(
     vocab_file="",
     ode_method=ode_method,
     use_ema=True,
-    device=device,
+    device="cpu",
 ):
     if vocab_file == "":
         vocab_file = str(files("f5_tts").joinpath("infer/examples/vocab.txt"))
@@ -228,7 +221,7 @@ def remove_silence_edges(audio, silence_threshold=-42):
 # preprocess reference audio and text
 
 
-def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_info=print, device=device):
+def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_info=print, device="cpu"):
     show_info("Converting audio...")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
         aseg = AudioSegment.from_file(ref_audio_orig)
@@ -283,6 +276,10 @@ def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_in
             global asr_pipe
             if asr_pipe is None:
                 show_info("Initializing ASR pipeline...")
+                try:
+                    dtype = torch.float16 if device == "cuda" else torch.float32
+                except Exception:
+                    dtype = torch.float32
                 asr_pipe = pipeline(
                     "automatic-speech-recognition",
                     model="openai/whisper-large-v3-turbo",
@@ -334,7 +331,7 @@ def infer_process(
     sway_sampling_coef=sway_sampling_coef,
     speed=speed,
     fix_duration=fix_duration,
-    device=device,
+    device="cpu",
 ):
     # Split the input text into batches
     audio, sr = torchaudio.load(ref_audio)
@@ -381,7 +378,7 @@ def infer_batch_process(
     sway_sampling_coef=-1,
     speed=1,
     fix_duration=None,
-    device=None,
+    device="cpu",
 ):
     audio, sr = ref_audio
     if audio.shape[0] > 1:
