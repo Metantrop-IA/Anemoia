@@ -159,8 +159,9 @@ def parse_speechtypes_text(gen_text):
 ########## INICIA GRADIO PRINCIPAL ##########
 with gr.Blocks() as app_chat:
     gr.Markdown(
-        """
+        f"""
 # Mnemosynth
+The Memory Synthesizer of {read_personality_file()}
 """
     )
 
